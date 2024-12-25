@@ -2,7 +2,6 @@
 import feedparser
 import asyncio
 import re
-from transformers import pipeline
 from telegram.ext import Application
 from datetime import datetime, timedelta
 from newspaper import Article  # To fetch full article content
@@ -15,6 +14,7 @@ from flask import Flask
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
 CHAT_ID = os.getenv("CHAT_ID")  # Use environment variable for chat/channel ID
+HF_API_KEY = os.getenv("HF_API_KEY")  # Hugging Face Inference API key
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://techcrunch.com/category/tech/feed/",
@@ -25,7 +25,6 @@ RSS_FEEDS = [
     "https://www.wired.com/feed/tag/ai/latest/rss",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml"
 ]
-SUMMARY_MODEL = "sshleifer/distilbart-cnn-12-6"
 CHECK_INTERVAL = 600  # 10 minutes in seconds
 NON_SILENT_INTERVAL = 3600  # 1 hour in seconds
 BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
@@ -44,38 +43,43 @@ app = Flask(__name__)
 def home():
     return "RSS Feed Telegram Bot is Running!"
 
-# Initialize summarizer
-try:
-    summarizer = pipeline("summarization", model=SUMMARY_MODEL)
-except Exception as e:
-    logger.error(f"Error initializing summarizer: {e}")
-    summarizer = None
-
 # Functions
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
 
 def summarize_text(title, content):
-    """Summarize content to the desired length."""
-    if summarizer is None:
-        logger.warning("Summarizer not initialized. Using fallback.")
+    """Summarize content using Hugging Face Inference API."""
+    if not HF_API_KEY:
+        logger.warning("Hugging Face API Key not set. Using fallback.")
         return content[:150]  # Fallback to truncation
+
+    payload = {
+        "inputs": f"{title}: {content}",
+        "parameters": {"min_length": 70, "max_length": 150},
+    }
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+
     try:
-        summary = summarizer(
-            f"{title}: {content}", max_length=150, min_length=70, do_sample=False
+        response = requests.post(
+            "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6",
+            json=payload,
+            headers=headers,
         )
-        return clean_text(summary[0]["summary_text"])
+        if response.status_code == 200:
+            return clean_text(response.json()[0]["summary_text"])
+        else:
+            logger.error(f"Hugging Face API Error: {response.json()}")
     except Exception as e:
-        logger.error(f"Error summarizing content: {e}")
-        return content[:150]  # Fallback to truncation
+        logger.error(f"Error using Hugging Face API: {e}")
+    
+    return content[:150]  # Fallback to truncation
 
 def extract_media_from_page(url):
     """Extract media URL from the full article page."""
     try:
         response = requests.get(url, timeout=10)
         soup = BeautifulSoup(response.content, "html.parser")
-        # Look for common image tags
         image_tag = soup.find("meta", property="og:image") or soup.find("img")
         if image_tag:
             return image_tag.get("content") or image_tag.get("src")
@@ -107,17 +111,12 @@ def fetch_articles():
                 guid = entry.get("id", entry.link)
                 if guid not in processed_articles:
                     processed_articles.add(guid)
-
-                    # Extract media content if available
                     media_url = entry.get("media_content", [{}])[0].get("url", "")
                     if not media_url:
                         media_url = entry.get("enclosures", [{}])[0].get("url", "")
-
-                    # Fetch full content and media if necessary
                     full_content, full_media_url = fetch_full_article_content(entry.link)
                     if not media_url:
                         media_url = full_media_url
-
                     articles.append({
                         "title": entry.title,
                         "link": entry.link,
@@ -125,8 +124,6 @@ def fetch_articles():
                         "published": entry.get("published", ""),
                         "media_url": media_url
                     })
-        except IndexError as e:
-            logger.error(f"IndexError for feed {feed_url}: {e}")
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
     return articles
