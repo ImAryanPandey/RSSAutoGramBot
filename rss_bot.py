@@ -117,6 +117,8 @@ def fetch_articles():
                         "published": entry.get("published", ""),
                         "media_url": media_url
                     })
+        except IndexError as e:
+            logger.error(f"IndexError for feed {feed_url}: {e}")
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
     return articles
