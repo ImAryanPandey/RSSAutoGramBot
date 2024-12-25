@@ -9,10 +9,11 @@ from newspaper import Article  # To fetch full article content
 import requests
 from bs4 import BeautifulSoup
 import logging
+import os
 
 # Configuration
-BOT_TOKEN = "7210131533:AAHP-rYxT02WeLLTG8q-UCaOrerlwIgPBuA"  # Replace with your bot token
-CHAT_ID = "@TechAIUpdate"  # Replace with your Telegram chat/channel ID
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
+CHAT_ID = os.getenv("CHAT_ID")  # Use environment variable for chat/channel ID
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://techcrunch.com/category/tech/feed/",
