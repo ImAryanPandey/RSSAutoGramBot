@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import os
+from flask import Flask
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
@@ -36,6 +37,12 @@ last_non_silent_post = datetime.min
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Flask app for Render Web Service
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "RSS Feed Telegram Bot is Running!"
 
 # Initialize summarizer
 try:
@@ -168,12 +175,9 @@ async def monitor_feeds():
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# Main execution
+# Start monitoring feeds in the background
+asyncio.ensure_future(monitor_feeds())
+
+# Run the Flask app
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        # If an event loop is already running
-        asyncio.ensure_future(monitor_feeds())
-    else:
-        # If no event loop is running, start one
-        loop.run_until_complete(monitor_feeds())
+    app.run(host="0.0.0.0", port=5000)
