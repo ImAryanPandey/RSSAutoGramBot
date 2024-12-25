@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import logging
 import os
 from flask import Flask
+from threading import Thread
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 # Flask app for Render Web Service
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "RSS Feed Telegram Bot is Running!"
@@ -75,18 +77,6 @@ def summarize_text(title, content):
     
     return content[:150]  # Fallback to truncation
 
-def extract_media_from_page(url):
-    """Extract media URL from the full article page."""
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
-        image_tag = soup.find("meta", property="og:image") or soup.find("img")
-        if image_tag:
-            return image_tag.get("content") or image_tag.get("src")
-    except Exception as e:
-        logger.error(f"Error fetching media from {url}: {e}")
-    return ""
-
 def fetch_full_article_content(url):
     """Fetch full article content and media from the link."""
     try:
@@ -111,18 +101,13 @@ def fetch_articles():
                 guid = entry.get("id", entry.link)
                 if guid not in processed_articles:
                     processed_articles.add(guid)
-                    media_url = entry.get("media_content", [{}])[0].get("url", "")
-                    if not media_url:
-                        media_url = entry.get("enclosures", [{}])[0].get("url", "")
                     full_content, full_media_url = fetch_full_article_content(entry.link)
-                    if not media_url:
-                        media_url = full_media_url
                     articles.append({
                         "title": entry.title,
                         "link": entry.link,
                         "summary": full_content or entry.get("summary", ""),
                         "published": entry.get("published", ""),
-                        "media_url": media_url
+                        "media_url": full_media_url
                     })
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
@@ -160,6 +145,7 @@ async def monitor_feeds():
     bot = application.bot
 
     while True:
+        logger.info("Fetching articles from RSS feeds...")
         articles = fetch_articles()
         for article in articles:
             now = datetime.now()
@@ -170,11 +156,19 @@ async def monitor_feeds():
             if not silent:
                 last_non_silent_post = now
 
+        logger.info(f"Sleeping for {CHECK_INTERVAL} seconds.")
         await asyncio.sleep(CHECK_INTERVAL)
 
-# Start monitoring feeds in the background
-asyncio.ensure_future(monitor_feeds())
+def start_monitor_feeds():
+    """Starts the monitor_feeds coroutine in a new thread."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(monitor_feeds())
 
-# Run the Flask app
 if __name__ == "__main__":
+    # Start the feed monitor in a background thread
+    thread = Thread(target=start_monitor_feeds, daemon=True)
+    thread.start()
+
+    # Start the Flask app
     app.run(host="0.0.0.0", port=5000)
