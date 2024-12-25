@@ -7,4 +7,5 @@ requests==2.31.0
 lxml_html_clean==0.1.0
 lxml==4.9.3
 torch==2.0.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+Flask==3.0.0
 python-dotenv==1.0.0
