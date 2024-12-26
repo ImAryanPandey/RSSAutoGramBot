@@ -1,3 +1,4 @@
+from flask import Flask
 import os
 import feedparser
 import asyncio
@@ -13,6 +14,9 @@ import logging
 
 # Load environment variables
 load_dotenv()
+
+# Flask setup
+app = Flask(__name__)
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -175,6 +179,18 @@ async def monitor_feeds():
         await asyncio.sleep(CHECK_INTERVAL)
 
 
+# Flask route to keep the service alive
+@app.route('/')
+def index():
+    return "Telegram RSS Bot is running!"
+
+# Start the background task
+@app.before_first_request
+def start_background_task():
+    asyncio.run(monitor_feeds())
+
+
 # Main execution
 if __name__ == "__main__":
-    asyncio.run(monitor_feeds())
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
