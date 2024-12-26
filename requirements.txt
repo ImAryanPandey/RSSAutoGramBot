@@ -7,3 +7,5 @@ newspaper3k
 requests
 beautifulsoup4
 python-dotenv
+torch  # For Hugging Face Transformers
+lxml[html_clean]  # Ensures proper lxml cleaning module
