@@ -25,7 +25,7 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://techcrunch.com/category/tech/feed/",
+    "https://techcrunch.com/feed/",
     "https://www.theverge.com/tech/rss/index.xml",
     "https://arstechnica.com/feed/",
     "https://wired.com/feed/category/tech/latest/rss",
