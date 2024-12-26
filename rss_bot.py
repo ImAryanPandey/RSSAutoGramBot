@@ -1,4 +1,5 @@
 # !pip install -r requirements.txt
+# !pip install -r requirements.txt
 import feedparser
 import asyncio
 import re
@@ -10,6 +11,7 @@ from bs4 import BeautifulSoup
 import logging
 import os
 from flask import Flask
+from threading import Thread
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,7 +36,11 @@ processed_articles = set()
 last_non_silent_post = datetime.min
 
 # Logging setup
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]  # Ensure logs are sent to stdout
+)
 logger = logging.getLogger(__name__)
 
 # Flask app for Render Web Service
@@ -139,22 +145,22 @@ async def post_to_telegram(bot, article, silent=False):
         caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
 
         if article["media_url"]:
-            await bot.send_photo(
+            response = await bot.send_photo(
                 chat_id=CHAT_ID,
                 photo=article["media_url"],
                 caption=caption,
                 parse_mode="Markdown",
                 disable_notification=silent
             )
-            logger.info(f"Photo message sent: {article['title']}")
+            logger.info(f"Photo message sent: {response}")
         else:
-            await bot.send_message(
+            response = await bot.send_message(
                 chat_id=CHAT_ID,
                 text=caption,
                 parse_mode="Markdown",
                 disable_notification=silent
             )
-            logger.info(f"Text message sent: {article['title']}")
+            logger.info(f"Text message sent: {response}")
     except Exception as e:
         logger.error(f"Error posting to Telegram: {e}")
 
@@ -165,6 +171,8 @@ async def monitor_feeds():
     logger.info("Starting feed monitoring...")
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
+
+    logger.debug(f"Bot initialized: {bot}")
 
     while True:
         logger.info("Checking for new articles...")
@@ -179,9 +187,18 @@ async def monitor_feeds():
         logger.info("Sleeping until next check...")
         await asyncio.sleep(CHECK_INTERVAL)
 
-# Start monitoring feeds in the background
-asyncio.ensure_future(monitor_feeds())
-
-# Run the Flask app
+# Run the Flask app and monitoring loop
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    logger.info("Starting RSS Feed Telegram Bot...")
+
+    # Debug environment variables
+    logger.debug(f"BOT_TOKEN: {BOT_TOKEN}")
+    logger.debug(f"CHAT_ID: {CHAT_ID}")
+    logger.debug(f"HF_API_KEY: {HF_API_KEY}")
+
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000))
+    flask_thread.start()
+
+    # Run the monitoring loop
+    asyncio.run(monitor_feeds())
