@@ -205,12 +205,11 @@ async def monitor_feeds():
 # Flask route to keep the service alive
 @app.route('/')
 def index():
+    # Start the background task if not already running
+    if not hasattr(app, 'feed_monitor_task'):
+        logger.info("Starting the background feed monitor task...")
+        app.feed_monitor_task = asyncio.create_task(monitor_feeds())
     return "Telegram RSS Bot is running!"
-
-# Start the background task
-@app.before_first_request
-def start_background_task():
-    asyncio.run(monitor_feeds())
 
 
 # Main execution
