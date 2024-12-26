@@ -8,3 +8,4 @@ lxml==4.9.3
 python-dotenv==1.0.0
 Flask==2.2.5
 schedule
+cachetools
