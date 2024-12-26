@@ -28,7 +28,6 @@ RSS_FEEDS = [
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/tech/rss/index.xml",
     "https://arstechnica.com/feed/",
-    "https://wired.com/feed/category/tech/latest/rss",
     "https://tldr.tech/api/rss/tech",
     "https://www.wired.com/feed/tag/ai/latest/rss",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
