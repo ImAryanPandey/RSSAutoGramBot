@@ -45,7 +45,7 @@ last_non_silent_post = datetime.min
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Functions
+
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
@@ -205,14 +205,11 @@ async def monitor_feeds():
 # Flask route to keep the service alive
 @app.route('/')
 def index():
-    # Start the background task if not already running
-    if not hasattr(app, 'feed_monitor_task'):
-        logger.info("Starting the background feed monitor task...")
-        app.feed_monitor_task = asyncio.create_task(monitor_feeds())
     return "Telegram RSS Bot is running!"
 
 
 # Main execution
 if __name__ == "__main__":
+    asyncio.run(monitor_feeds())
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
