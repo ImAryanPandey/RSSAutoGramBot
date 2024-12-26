@@ -1,11 +1,10 @@
 # !pip install -r requirements.txt
-# !pip install -r requirements.txt
 import feedparser
 import asyncio
 import re
 from telegram.ext import Application
 from datetime import datetime, timedelta
-from newspaper import Article  # To fetch full article content
+from newspaper import Article
 import requests
 from bs4 import BeautifulSoup
 import logging
@@ -13,9 +12,9 @@ import os
 from flask import Flask
 
 # Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
-CHAT_ID = os.getenv("CHAT_ID")  # Use environment variable for chat/channel ID
-HF_API_KEY = os.getenv("HF_API_KEY")  # Hugging Face Inference API key
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+HF_API_KEY = os.getenv("HF_API_KEY")
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://techcrunch.com/category/tech/feed/",
@@ -35,7 +34,7 @@ processed_articles = set()
 last_non_silent_post = datetime.min
 
 # Logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Flask app for Render Web Service
@@ -102,7 +101,9 @@ def fetch_full_article_content(url):
 def fetch_articles():
     """Fetch articles from multiple RSS feeds."""
     articles = []
+    logger.info(f"Fetching articles from {len(RSS_FEEDS)} RSS feeds...")
     for feed_url in RSS_FEEDS:
+        logger.debug(f"Processing feed: {feed_url}")
         try:
             feed = feedparser.parse(feed_url)
             if not feed.entries:
@@ -125,8 +126,10 @@ def fetch_articles():
                         "published": entry.get("published", ""),
                         "media_url": media_url
                     })
+                    logger.debug(f"Article added: {entry.title}")
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
+    logger.info(f"Total articles fetched: {len(articles)}")
     return articles
 
 async def post_to_telegram(bot, article, silent=False):
@@ -136,22 +139,22 @@ async def post_to_telegram(bot, article, silent=False):
         caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
 
         if article["media_url"]:
-            response = await bot.send_photo(
+            await bot.send_photo(
                 chat_id=CHAT_ID,
                 photo=article["media_url"],
                 caption=caption,
                 parse_mode="Markdown",
                 disable_notification=silent
             )
+            logger.info(f"Photo message sent: {article['title']}")
         else:
-            response = await bot.send_message(
+            await bot.send_message(
                 chat_id=CHAT_ID,
                 text=caption,
                 parse_mode="Markdown",
                 disable_notification=silent
             )
-
-        logger.info(f"Message sent successfully: {response}")
+            logger.info(f"Text message sent: {article['title']}")
     except Exception as e:
         logger.error(f"Error posting to Telegram: {e}")
 
@@ -159,24 +162,21 @@ async def monitor_feeds():
     """Monitor RSS feeds and post updates to Telegram."""
     global last_non_silent_post
 
+    logger.info("Starting feed monitoring...")
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
 
     while True:
+        logger.info("Checking for new articles...")
         articles = fetch_articles()
-        logger.info(f"Fetched {len(articles)} articles.")
-
         for article in articles:
-            logger.info(f"Processing article: {article['title']}")
             now = datetime.now()
             silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
-
             await post_to_telegram(bot, article, silent=silent)
-
             if not silent:
                 last_non_silent_post = now
 
-        logger.info("Sleeping until next fetch cycle.")
+        logger.info("Sleeping until next check...")
         await asyncio.sleep(CHECK_INTERVAL)
 
 # Start monitoring feeds in the background
