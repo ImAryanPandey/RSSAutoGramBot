@@ -10,6 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import logging
+from telegram.helpers import escape_markdown
 
 # Load environment variables
 load_dotenv()
@@ -49,6 +50,11 @@ logger = logging.getLogger(__name__)
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
+
+
+def escape_telegram_markdown(text):
+    """Escape special characters for Telegram Markdown."""
+    return escape_markdown(text, version=2)
 
 
 def summarize_with_meaningcloud(title, content):
@@ -97,31 +103,6 @@ def summarize_text(title, content, fallback):
     return summary
 
 
-def extract_media_from_page(url):
-    """Extract media URL from the full article page."""
-    try:
-        response = requests.get(url, timeout=10)
-        soup = BeautifulSoup(response.content, "html.parser")
-        image_tag = soup.find("meta", property="og:image") or soup.find("img")
-        if image_tag:
-            return image_tag.get("content") or image_tag.get("src")
-    except Exception as e:
-        logger.error(f"Error fetching media from {url}: {e}")
-    return ""
-
-
-def fetch_full_article_content(url):
-    """Fetch full article content and media from the link."""
-    try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text, article.top_image
-    except Exception as e:
-        logger.error(f"Error fetching full article from {url}: {e}")
-        return "", ""
-
-
 def fetch_articles():
     """Fetch articles from multiple RSS feeds."""
     articles = []
@@ -135,22 +116,15 @@ def fetch_articles():
                 guid = entry.get("id", entry.link)
                 if guid not in processed_articles:
                     processed_articles.add(guid)
-
-                    media_url = None
-                    enclosures = entry.get("enclosures", [])
-                    if enclosures and "url" in enclosures[0]:
-                        media_url = enclosures[0]["url"]
-
-                    full_content, full_media_url = fetch_full_article_content(entry.link)
-                    if not media_url:
-                        media_url = full_media_url
-
+                    title = entry.title
+                    summary = entry.get("summary", title)
+                    if title in summary:
+                        summary = summary.replace(title, "").strip()
                     articles.append({
-                        "title": entry.title,
+                        "title": title,
                         "link": entry.link,
-                        "summary": entry.get("summary", entry.title),
-                        "published": entry.get("published", ""),
-                        "media_url": media_url
+                        "summary": summary,
+                        "media_url": entry.get("media_content", [{}])[0].get("url", ""),
                     })
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
@@ -161,21 +135,21 @@ async def post_to_telegram(bot, article, silent=False):
     """Post an article to Telegram."""
     try:
         summary = summarize_text(article["title"], article["summary"], article["summary"])
-        caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
+        caption = f"*{escape_telegram_markdown(article['title'])}*\n\n{escape_telegram_markdown(summary)}\n\n{escape_telegram_markdown(BRANDING_MESSAGE)}"
 
         if article["media_url"]:
             await bot.send_photo(
                 chat_id=CHAT_ID,
                 photo=article["media_url"],
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode="MarkdownV2",
                 disable_notification=silent
             )
         else:
             await bot.send_message(
                 chat_id=CHAT_ID,
                 text=caption,
-                parse_mode="Markdown",
+                parse_mode="MarkdownV2",
                 disable_notification=silent
             )
     except Exception as e:
@@ -184,22 +158,13 @@ async def post_to_telegram(bot, article, silent=False):
 
 async def monitor_feeds():
     """Monitor RSS feeds and post updates to Telegram."""
-    global last_non_silent_post
-
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
 
     while True:
         articles = fetch_articles()
         for article in articles:
-            now = datetime.now()
-            silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
-
-            await post_to_telegram(bot, article, silent=silent)
-
-            if not silent:
-                last_non_silent_post = now
-
+            await post_to_telegram(bot, article)
         await asyncio.sleep(CHECK_INTERVAL)
 
 
