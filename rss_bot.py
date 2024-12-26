@@ -1,4 +1,5 @@
-# !pip install -r requirements.txt
+import schedule
+import time
 import feedparser
 import asyncio
 import re
@@ -11,11 +12,12 @@ import logging
 import os
 from flask import Flask
 from threading import Thread
+import cachetools.func
 
-# Configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-HF_API_KEY = os.getenv("HF_API_KEY")
+# Configuration (from Render Secrets)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+HF_API_KEY = os.environ.get("HF_API_KEY")
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://techcrunch.com/category/tech/feed/",
@@ -32,8 +34,8 @@ RSS_FEEDS = [
     "https://openai.com/blog/rss/",
     "https://blogs.nvidia.com/blog/feed/",
 ]
-CHECK_INTERVAL = 600  # 10 minutes in seconds
-NON_SILENT_INTERVAL = 3600  # 1 hour in seconds
+CHECK_INTERVAL = 900  # 15 minutes
+NON_SILENT_INTERVAL = 3600  # 1 hour
 BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
 
 # State tracking
@@ -41,29 +43,21 @@ processed_articles = set()
 last_non_silent_post = datetime.min
 
 # Logging setup
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]  # Ensure logs are sent to stdout
-)
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# Flask app for Render Web Service
+# Flask app
 app = Flask(__name__)
 @app.route('/')
 def home():
     return "RSS Feed Telegram Bot is Running!"
 
-# Functions
-def clean_text(text):
-    """Clean text using regex."""
-    return re.sub(r'\s+([.,!?])', r'\1', text)
-
+# Cached summarize function
+@cachetools.func.ttl_cache(maxsize=128, ttl=300)
 def summarize_text(title, content):
-    """Summarize content using Hugging Face Inference API."""
     if not HF_API_KEY:
         logger.warning("Hugging Face API Key not set. Using fallback.")
-        return content[:150]  # Fallback to truncation
+        return content[:150]
 
     payload = {
         "inputs": f"{title}: {content}",
@@ -76,30 +70,35 @@ def summarize_text(title, content):
             "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6",
             json=payload,
             headers=headers,
+            timeout=10 #Added timeout to prevent hanging
         )
-        if response.status_code == 200:
-            return clean_text(response.json()[0]["summary_text"])
-        else:
-            logger.error(f"Hugging Face API Error: {response.json()}")
-    except Exception as e:
-        logger.error(f"Error using Hugging Face API: {e}")
-    
-    return content[:150]  # Fallback to truncation
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        return clean_text(response.json()[0]["summary_text"])
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Hugging Face API Error: {e}")
+        if response is not None:
+            try:
+                logger.error(f"Hugging Face API Response: {response.json()}")
+            except ValueError:
+                logger.error(f"Hugging Face API Response Content: {response.content}")
+    return content[:150]
+
+def clean_text(text):
+    return re.sub(r'\s+([.,!?])', r'\1', text)
 
 def extract_media_from_page(url):
-    """Extract media URL from the full article page."""
     try:
         response = requests.get(url, timeout=10)
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, "html.parser")
         image_tag = soup.find("meta", property="og:image") or soup.find("img")
         if image_tag:
             return image_tag.get("content") or image_tag.get("src")
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching media from {url}: {e}")
     return ""
 
 def fetch_full_article_content(url):
-    """Fetch full article content and media from the link."""
     try:
         article = Article(url)
         article.download()
@@ -107,10 +106,9 @@ def fetch_full_article_content(url):
         return article.text, article.top_image
     except Exception as e:
         logger.error(f"Error fetching full article from {url}: {e}")
-        return "", ""
+    return "", ""
 
 def fetch_articles():
-    """Fetch articles from multiple RSS feeds."""
     articles = []
     logger.info(f"Fetching articles from {len(RSS_FEEDS)} RSS feeds...")
     for feed_url in RSS_FEEDS:
@@ -144,130 +142,27 @@ def fetch_articles():
     return articles
 
 async def post_to_telegram(bot, article, silent=False):
-    """Post an article to Telegram."""
     try:
         summary = summarize_text(article["title"], article["summary"])
-        caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
+        caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}\n{article['link']}" #Added Link for better user experience
 
         if article["media_url"]:
-            response = await bot.send_photo(
-                chat_id=CHAT_ID,
-                photo=article["media_url"],
-                caption=caption,
-                parse_mode="Markdown",
-                disable_notification=silent
-            )
-            logger.info(f"Photo message sent: {response}")
+            try:
+                response = await bot.send_photo(chat_id=CHAT_ID, photo=article["media_url"], caption=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
+                logger.info(f"Photo message sent: {response}")
+            except Exception as e:
+                logger.error(f"Error sending photo, trying text only: {e}")
+                response = await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
+                logger.info(f"Text message sent as fallback: {response}")
+
         else:
-            response = await bot.send_message(
-                chat_id=CHAT_ID,
-                text=caption,
-                parse_mode="Markdown",
-                disable_notification=silent
-            )
+            response = await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
             logger.info(f"Text message sent: {response}")
+
     except Exception as e:
         logger.error(f"Error posting to Telegram: {e}")
 
-async def monitor_feeds():
-    """Monitor RSS feeds and post updates to Telegram."""
-    global last_non_silent_post
-
-    logger.info("Starting feed monitoring...")
-    application = Application.builder().token(BOT_TOKEN).build()
-    bot = application.bot
-
-    logger.debug(f"Bot initialized: {bot}")
-
-    while True:
-        logger.info("Checking for new articles...")
-        articles = fetch_articles()
-        for article in articles:
-            now = datetime.now()
-            silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
-            await post_to_telegram(bot, article, silent=silent)
-            if not silent:
-                last_non_silent_post = now
-
-        logger.info("Sleeping until next check...")
-        await asyncio.sleep(CHECK_INTERVAL)
-
-# Run the Flask app and monitoring loop
-if __name__ == "__main__":
-    logger.info("Starting RSS Feed Telegram Bot...")
-
-    # Debug environment variables
-    logger.debug(f"BOT_TOKEN: {BOT_TOKEN}")
-    logger.debug(f"CHAT_ID: {CHAT_ID}")
-    logger.debug(f"HF_API_KEY: {HF_API_KEY}")
-
-    # Start Flask in a separate thread
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000))
-    flask_thread.start()
-
-    # Run the monitoring loop
-    asyncio.run(monitor_feeds())
-import schedule
-import time
-import feedparser
-import asyncio
-import re
-from telegram.ext import Application
-from datetime import datetime, timedelta
-from newspaper import Article
-import requests
-from bs4 import BeautifulSoup
-import logging
-import os
-from flask import Flask
-from threading import Thread
-import cachetools.func  # For caching
-
-# Configuration (from Render Secrets)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-HF_API_KEY = os.environ.get("HF_API_KEY")
-RSS_FEEDS = [
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
-    # ... other RSS feeds
-]
-CHECK_INTERVAL = 900  # 15 minutes (to keep instance awake)
-NON_SILENT_INTERVAL = 3600  # 1 hour
-BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
-
-# State tracking
-processed_articles = set()
-last_non_silent_post = datetime.min
-
-# Logging setup (same as before)
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()])
-logger = logging.getLogger(__name__)
-
-# Flask app (same as before)
-app = Flask(__name__)
-@app.route('/')
-def home():
-    return "RSS Feed Telegram Bot is Running!"
-
-# Cached summarize function (using cachetools)
-@cachetools.func.ttl_cache(maxsize=128, ttl=300)  # Cache for 5 minutes
-def summarize_text(title, content):
-    """Summarize content using Hugging Face, with caching."""
-    if not HF_API_KEY:
-        logger.warning("Hugging Face API Key not set. Using fallback.")
-        return content[:150]
-
-    # ... (rest of the summarize_text function remains the same)
-
-# ... (Other functions: clean_text, extract_media_from_page, fetch_full_article_content remain the same)
-
-def fetch_articles():
-    # ... (This function remains the same)
-
-async def post_to_telegram(bot, article, silent=False):
-    # ... (This function remains the same)
-
-async def process_feeds_once(bot): #New function to process feeds once
+async def process_feeds_once(bot):
     global last_non_silent_post
     logger.info("Checking for new articles...")
     articles = fetch_articles()
@@ -279,26 +174,10 @@ async def process_feeds_once(bot): #New function to process feeds once
             last_non_silent_post = now
 
 async def run_bot():
-    """Initialize and run the Telegram bot."""
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
-    await bot.initialize() # Initialize the bot
-    await process_feeds_once(bot) # Process feeds once on startup
+    await bot.initialize()
+    await process_feeds_once(bot)
 
     async def scheduled_check():
-        await process_feeds_once(bot)
-
-    schedule.every(CHECK_INTERVAL).seconds.do(asyncio.run, scheduled_check()) #Schedule the check
-    while True:
-        schedule.run_pending()
-        await asyncio.sleep(1)
-
-if __name__ == "__main__":
-    logger.info("Starting RSS Feed Telegram Bot...")
-
-    # Start Flask in a separate thread
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)) #Added debug and reloader to prevent issues
-    flask_thread.start()
-
-    # Run the bot in the main thread
-    asyncio.run(run_bot())
+        await process_feeds_
