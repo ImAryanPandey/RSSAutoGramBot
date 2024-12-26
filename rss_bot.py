@@ -1,23 +1,26 @@
-import schedule
-import time
-import feedparser
-import asyncio
-import re
-from telegram.ext import Application
-from datetime import datetime, timedelta
-from newspaper import Article
-import requests
-from bs4 import BeautifulSoup
-import logging
 import os
+import logging
+import requests
+import feedparser
+import schedule
+import threading
+from datetime import datetime, timedelta
+from telegram import Bot, ParseMode
+from telegram.error import TelegramError
+from newspaper import Article
+from cachetools import TTLCache
 from flask import Flask
-from threading import Thread
-import cachetools.func
+from bs4 import BeautifulSoup
 
-# Configuration (from Render Secrets)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-HF_API_KEY = os.environ.get("HF_API_KEY")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Environment variables
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+HUGGINGFACE_API_KEY = os.environ.get('HUGGINGFACE_API_KEY')
+
+# Constants
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://techcrunch.com/category/tech/feed/",
@@ -34,156 +37,95 @@ RSS_FEEDS = [
     "https://openai.com/blog/rss/",
     "https://blogs.nvidia.com/blog/feed/",
 ]
-CHECK_INTERVAL = 900  # 15 minutes
-NON_SILENT_INTERVAL = 3600  # 1 hour
-BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
 
-# State tracking
-processed_articles = set()
-last_non_silent_post = datetime.min
+cache = TTLCache(maxsize=128, ttl=300)
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# Logging setup
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()])
-logger = logging.getLogger(__name__)
-
-# Flask app
 app = Flask(__name__)
+
 @app.route('/')
 def home():
     return "RSS Feed Telegram Bot is Running!"
 
-# Cached summarize function
-@cachetools.func.ttl_cache(maxsize=128, ttl=300)
-def summarize_text(title, content):
-    if not HF_API_KEY:
-        logger.warning("Hugging Face API Key not set. Using fallback.")
-        return content[:150]
-
-    payload = {
-        "inputs": f"{title}: {content}",
-        "parameters": {"min_length": 70, "max_length": 150},
-    }
-    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-
-    try:
+def summarize_article(content):
+    if HUGGINGFACE_API_KEY:
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
         response = requests.post(
             "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6",
-            json=payload,
             headers=headers,
-            timeout=10 #Added timeout to prevent hanging
+            json={"inputs": content},
+            timeout=10
         )
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-        return clean_text(response.json()[0]["summary_text"])
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Hugging Face API Error: {e}")
-        if response is not None:
-            try:
-                logger.error(f"Hugging Face API Response: {response.json()}")
-            except ValueError:
-                logger.error(f"Hugging Face API Response Content: {response.content}")
+        if response.status_code == 200:
+            return response.json().get('summary_text', content[:150])
+        else:
+            logging.error(f"Hugging Face API Error: {response.status_code}, {response.text}")
     return content[:150]
 
-def clean_text(text):
-    return re.sub(r'\s+([.,!?])', r'\1', text)
-
-def extract_media_from_page(url):
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
-        image_tag = soup.find("meta", property="og:image") or soup.find("img")
-        if image_tag:
-            return image_tag.get("content") or image_tag.get("src")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching media from {url}: {e}")
-    return ""
-
-def fetch_full_article_content(url):
-    try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text, article.top_image
-    except Exception as e:
-        logger.error(f"Error fetching full article from {url}: {e}")
-    return "", ""
-
 def fetch_articles():
-    articles = []
-    logger.info(f"Fetching articles from {len(RSS_FEEDS)} RSS feeds...")
     for feed_url in RSS_FEEDS:
-        logger.debug(f"Processing feed: {feed_url}")
         try:
             feed = feedparser.parse(feed_url)
-            if not feed.entries:
-                logger.warning(f"No entries found in feed: {feed_url}")
-                continue
-            for entry in feed.entries:
-                guid = entry.get("id", entry.link)
-                if guid not in processed_articles:
-                    processed_articles.add(guid)
-                    media_url = entry.get("media_content", [{}])[0].get("url", "")
-                    if not media_url:
-                        media_url = entry.get("enclosures", [{}])[0].get("url", "")
-                    full_content, full_media_url = fetch_full_article_content(entry.link)
-                    if not media_url:
-                        media_url = full_media_url
-                    articles.append({
-                        "title": entry.title,
-                        "link": entry.link,
-                        "summary": full_content or entry.get("summary", ""),
-                        "published": entry.get("published", ""),
-                        "media_url": media_url
-                    })
-                    logger.debug(f"Article added: {entry.title}")
+            for entry in feed.entries[:5]:  # Process only the latest 5 entries
+                if entry.link in cache:
+                    continue
+
+                cache[entry.link] = True
+                title = entry.title
+                link = entry.link
+                summary = entry.get('summary', '')
+                pub_date = entry.get('published', 'Unknown date')
+                media_url = None
+
+                if hasattr(entry, 'media_content'):
+                    media_url = entry.media_content[0]['url']
+                elif hasattr(entry, 'enclosures') and entry.enclosures:
+                    media_url = entry.enclosures[0]['url']
+
+                if not summary:
+                    try:
+                        article = Article(link)
+                        article.download()
+                        article.parse()
+                        summary = article.text[:500]
+                    except Exception as e:
+                        logging.error(f"Error fetching full article for {link}: {e}")
+
+                summarized_text = summarize_article(summary)
+                post_to_telegram(title, summarized_text, link, media_url)
         except Exception as e:
-            logger.error(f"Error fetching articles from {feed_url}: {e}")
-    logger.info(f"Total articles fetched: {len(articles)}")
-    return articles
+            logging.error(f"Error processing feed {feed_url}: {e}")
 
-async def post_to_telegram(bot, article, silent=False):
+def post_to_telegram(title, summary, link, media_url):
+    message = f"*{title}*\n\n{summary}\n\n[Read more]({link})\n\nFollow us for the latest updates in tech and AI!"
+    silent = datetime.now() - timedelta(hours=1) < max(cache.values(), default=datetime.min)
+
     try:
-        summary = summarize_text(article["title"], article["summary"])
-        caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}\n{article['link']}" #Added Link for better user experience
-
-        if article["media_url"]:
-            try:
-                response = await bot.send_photo(chat_id=CHAT_ID, photo=article["media_url"], caption=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
-                logger.info(f"Photo message sent: {response}")
-            except Exception as e:
-                logger.error(f"Error sending photo, trying text only: {e}")
-                response = await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
-                logger.info(f"Text message sent as fallback: {response}")
-
+        if media_url:
+            bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=media_url,
+                caption=message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=silent
+            )
         else:
-            response = await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="Markdown", disable_notification=silent, timeout=10)
-            logger.info(f"Text message sent: {response}")
+            bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_notification=silent
+            )
+        logging.info(f"Posted to Telegram: {title}")
+    except TelegramError as e:
+        logging.error(f"Telegram posting error: {e}")
 
-    except Exception as e:
-        logger.error(f"Error posting to Telegram: {e}")
-
-async def process_feeds_once(bot):
-    global last_non_silent_post
-    logger.info("Checking for new articles...")
-    articles = fetch_articles()
-    now = datetime.now()
-    for article in articles:
-        silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
-        await post_to_telegram(bot, article, silent=silent)
-        if not silent:
-            last_non_silent_post = now
-
-async def run_bot():
-    application = Application.builder().token(BOT_TOKEN).build()
-    bot = application.bot
-    await bot.initialize()
-    await process_feeds_once(bot)
-
-    async def scheduled_check():
-        await process_feeds_
-
-
-
+def schedule_tasks():
+    schedule.every(15).minutes.do(fetch_articles)
+    while True:
+        schedule.run_pending()
+        threading.Event().wait(1)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000) 
+    threading.Thread(target=schedule_tasks, daemon=True).start()
+    app.run(host="0.0.0.0", port=5000)
