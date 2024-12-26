@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 def clean_text(text):
     """Clean text using regex."""
+    text = re.sub(r'(?:\s*\b(\w+)\b\s*){3,}', r'\1', text)  # Remove repeated words
     return re.sub(r'\s+([.,!?])', r'\1', text)
 
 
@@ -57,49 +58,14 @@ def escape_telegram_markdown(text):
     return escape_markdown(text, version=2)
 
 
-def summarize_with_meaningcloud(title, content):
-    """Summarize text using MeaningCloud API."""
-    try:
-        url = "https://api.meaningcloud.com/summarization-1.0"
-        params = {
-            "key": MEANINGCLOUD_API_KEY,
-            "txt": f"{title}: {content}",
-            "sentences": 5,  # Approximate to 100-200 words
-        }
-        response = requests.post(url, data=params, timeout=10)
-        if response.status_code == 200:
-            return clean_text(response.json().get("summary", ""))
-    except Exception as e:
-        logger.error(f"Error using MeaningCloud API: {e}")
-    return None
-
-
-def summarize_with_huggingface(title, content):
-    """Summarize text using Hugging Face API."""
-    try:
-        url = "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
-        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
-        data = {
-            "inputs": f"{title}: {content}",
-            "parameters": {"min_length": 100, "max_length": 200, "do_sample": False},
-        }
-        response = requests.post(url, json=data, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return clean_text(response.json()[0]["summary_text"])
-    except Exception as e:
-        logger.error(f"Error using Hugging Face API: {e}")
-    return None
-
-
 def summarize_text(title, content, fallback):
-    """Attempt summarization using available methods."""
-    summary = summarize_with_meaningcloud(title, content)
-    if not summary:
-        logger.info("Falling back to Hugging Face API for summarization.")
-        summary = summarize_with_huggingface(title, content)
-    if not summary:
-        logger.info("Falling back to RSS description or title for summarization.")
-        summary = fallback
+    """Summarize text using basic NLP cleaning."""
+    if not content or content.strip() == "":
+        logger.warning("Content is empty; falling back to title.")
+        return fallback
+    summary = clean_text(content)
+    if len(summary) > 200:  # Limit summary length
+        summary = summary[:200] + "..."
     return summary
 
 
@@ -120,11 +86,16 @@ def fetch_articles():
                     summary = entry.get("summary", title)
                     if title in summary:
                         summary = summary.replace(title, "").strip()
+                    media_url = None
+                    enclosures = entry.get("enclosures", [])
+                    if enclosures and "url" in enclosures[0]:
+                        media_url = enclosures[0]["url"]
+
                     articles.append({
                         "title": title,
                         "link": entry.link,
                         "summary": summary,
-                        "media_url": entry.get("media_content", [{}])[0].get("url", ""),
+                        "media_url": media_url,
                     })
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
@@ -134,7 +105,7 @@ def fetch_articles():
 async def post_to_telegram(bot, article, silent=False):
     """Post an article to Telegram."""
     try:
-        summary = summarize_text(article["title"], article["summary"], article["summary"])
+        summary = summarize_text(article["title"], article["summary"], article["title"])
         caption = f"*{escape_telegram_markdown(article['title'])}*\n\n{escape_telegram_markdown(summary)}\n\n{escape_telegram_markdown(BRANDING_MESSAGE)}"
 
         if article["media_url"]:
