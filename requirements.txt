@@ -6,3 +6,4 @@ newspaper3k
 requests
 beautifulsoup4
 python-dotenv
+lxml[html_clean]  # Fix for the lxml.html.clean dependency
