@@ -3,7 +3,6 @@ import os
 import feedparser
 import asyncio
 import re
-from transformers import pipeline
 from telegram.ext import Application
 from datetime import datetime, timedelta
 from newspaper import Article
@@ -21,6 +20,8 @@ app = Flask(__name__)
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+MEANINGCLOUD_API_KEY = os.getenv("MEANINGCLOUD_API_KEY")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
@@ -32,7 +33,6 @@ RSS_FEEDS = [
     "https://www.wired.com/feed/tag/ai/latest/rss",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
 ]
-SUMMARY_MODEL = "sshleifer/distilbart-cnn-12-6"
 CHECK_INTERVAL = 600  # 10 minutes in seconds
 NON_SILENT_INTERVAL = 3600  # 1 hour in seconds
 BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
@@ -45,33 +45,56 @@ last_non_silent_post = datetime.min
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Initialize summarizer
-try:
-    summarizer = pipeline("summarization", model=SUMMARY_MODEL)
-except Exception as e:
-    logger.error(f"Error initializing summarizer: {e}")
-    summarizer = None
-
-
 # Functions
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
 
 
-def summarize_text(title, content):
-    """Summarize content to the desired length."""
-    if summarizer is None:
-        logger.warning("Summarizer not initialized. Using fallback.")
-        return content[:150]
+def summarize_with_meaningcloud(title, content):
+    """Summarize text using MeaningCloud API."""
     try:
-        summary = summarizer(
-            f"{title}: {content}", max_length=150, min_length=70, do_sample=False
-        )
-        return clean_text(summary[0]["summary_text"])
+        url = "https://api.meaningcloud.com/summarization-1.0"
+        params = {
+            "key": MEANINGCLOUD_API_KEY,
+            "txt": f"{title}: {content}",
+            "sentences": 5,  # Approximate to 100-200 words
+        }
+        response = requests.post(url, data=params, timeout=10)
+        if response.status_code == 200:
+            return clean_text(response.json().get("summary", ""))
     except Exception as e:
-        logger.error(f"Error summarizing content: {e}")
-        return content[:150]
+        logger.error(f"Error using MeaningCloud API: {e}")
+    return None
+
+
+def summarize_with_huggingface(title, content):
+    """Summarize text using Hugging Face API."""
+    try:
+        url = "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+        data = {
+            "inputs": f"{title}: {content}",
+            "parameters": {"min_length": 100, "max_length": 200, "do_sample": False},
+        }
+        response = requests.post(url, json=data, headers=headers, timeout=10)
+        if response.status_code == 200:
+            return clean_text(response.json()[0]["summary_text"])
+    except Exception as e:
+        logger.error(f"Error using Hugging Face API: {e}")
+    return None
+
+
+def summarize_text(title, content, fallback):
+    """Attempt summarization using available methods."""
+    summary = summarize_with_meaningcloud(title, content)
+    if not summary:
+        logger.info("Falling back to Hugging Face API for summarization.")
+        summary = summarize_with_huggingface(title, content)
+    if not summary:
+        logger.info("Falling back to RSS description or title for summarization.")
+        summary = fallback
+    return summary
 
 
 def extract_media_from_page(url):
@@ -124,7 +147,7 @@ def fetch_articles():
                     articles.append({
                         "title": entry.title,
                         "link": entry.link,
-                        "summary": full_content or entry.get("summary", ""),
+                        "summary": entry.get("summary", entry.title),
                         "published": entry.get("published", ""),
                         "media_url": media_url
                     })
@@ -136,7 +159,7 @@ def fetch_articles():
 async def post_to_telegram(bot, article, silent=False):
     """Post an article to Telegram."""
     try:
-        summary = summarize_text(article["title"], article["summary"])
+        summary = summarize_text(article["title"], article["summary"], article["summary"])
         caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
 
         if article["media_url"]:
