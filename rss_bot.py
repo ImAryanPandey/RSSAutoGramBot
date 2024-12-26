@@ -25,9 +25,10 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://techcrunch.com/feed/",
+    "https://techcrunch.com/category/tech/feed/",
     "https://www.theverge.com/tech/rss/index.xml",
     "https://arstechnica.com/feed/",
+    "https://wired.com/feed/category/tech/latest/rss",
     "https://tldr.tech/api/rss/tech",
     "https://www.wired.com/feed/tag/ai/latest/rss",
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
@@ -135,9 +136,10 @@ def fetch_articles():
                 if guid not in processed_articles:
                     processed_articles.add(guid)
 
-                    media_url = entry.get("media_content", [{}])[0].get("url", "")
-                    if not media_url:
-                        media_url = entry.get("enclosures", [{}])[0].get("url", "")
+                    media_url = None
+                    enclosures = entry.get("enclosures", [])
+                    if enclosures and "url" in enclosures[0]:
+                        media_url = enclosures[0]["url"]
 
                     full_content, full_media_url = fetch_full_article_content(entry.link)
                     if not media_url:
@@ -201,14 +203,12 @@ async def monitor_feeds():
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-# Flask route to keep the service alive
-@app.route('/')
-def index():
-    return "Telegram RSS Bot is running!"
+async def run_app():
+    """Run both Flask app and monitor_feeds concurrently."""
+    flask_task = asyncio.to_thread(app.run, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    monitor_task = monitor_feeds()
+    await asyncio.gather(flask_task, monitor_task)
 
 
-# Main execution
 if __name__ == "__main__":
-    asyncio.run(monitor_feeds())
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    asyncio.run(run_app())
