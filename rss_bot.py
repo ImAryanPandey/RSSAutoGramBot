@@ -1,5 +1,4 @@
 # !pip install -r requirements.txt
-# !pip install -r requirements.txt
 import feedparser
 import asyncio
 import re
@@ -25,7 +24,13 @@ RSS_FEEDS = [
     "https://www.wired.com/feed/rss",
     "https://tldr.tech/api/rss/tech",
     "https://www.wired.com/feed/tag/ai/latest/rss",
-    "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml"
+    "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
+    "https://www.technologyreview.com/feed/",
+    "https://venturebeat.com/feed/",
+    "https://www.zdnet.com/rss/all/",
+    "https://ai.googleblog.com/feeds/posts/default",
+    "https://openai.com/blog/rss/",
+    "https://blogs.nvidia.com/blog/feed/",
 ]
 CHECK_INTERVAL = 600  # 10 minutes in seconds
 NON_SILENT_INTERVAL = 3600  # 1 hour in seconds
@@ -202,3 +207,98 @@ if __name__ == "__main__":
 
     # Run the monitoring loop
     asyncio.run(monitor_feeds())
+import schedule
+import time
+import feedparser
+import asyncio
+import re
+from telegram.ext import Application
+from datetime import datetime, timedelta
+from newspaper import Article
+import requests
+from bs4 import BeautifulSoup
+import logging
+import os
+from flask import Flask
+from threading import Thread
+import cachetools.func  # For caching
+
+# Configuration (from Render Secrets)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+HF_API_KEY = os.environ.get("HF_API_KEY")
+RSS_FEEDS = [
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    # ... other RSS feeds
+]
+CHECK_INTERVAL = 900  # 15 minutes (to keep instance awake)
+NON_SILENT_INTERVAL = 3600  # 1 hour
+BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
+
+# State tracking
+processed_articles = set()
+last_non_silent_post = datetime.min
+
+# Logging setup (same as before)
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()])
+logger = logging.getLogger(__name__)
+
+# Flask app (same as before)
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "RSS Feed Telegram Bot is Running!"
+
+# Cached summarize function (using cachetools)
+@cachetools.func.ttl_cache(maxsize=128, ttl=300)  # Cache for 5 minutes
+def summarize_text(title, content):
+    """Summarize content using Hugging Face, with caching."""
+    if not HF_API_KEY:
+        logger.warning("Hugging Face API Key not set. Using fallback.")
+        return content[:150]
+
+    # ... (rest of the summarize_text function remains the same)
+
+# ... (Other functions: clean_text, extract_media_from_page, fetch_full_article_content remain the same)
+
+def fetch_articles():
+    # ... (This function remains the same)
+
+async def post_to_telegram(bot, article, silent=False):
+    # ... (This function remains the same)
+
+async def process_feeds_once(bot): #New function to process feeds once
+    global last_non_silent_post
+    logger.info("Checking for new articles...")
+    articles = fetch_articles()
+    now = datetime.now()
+    for article in articles:
+        silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
+        await post_to_telegram(bot, article, silent=silent)
+        if not silent:
+            last_non_silent_post = now
+
+async def run_bot():
+    """Initialize and run the Telegram bot."""
+    application = Application.builder().token(BOT_TOKEN).build()
+    bot = application.bot
+    await bot.initialize() # Initialize the bot
+    await process_feeds_once(bot) # Process feeds once on startup
+
+    async def scheduled_check():
+        await process_feeds_once(bot)
+
+    schedule.every(CHECK_INTERVAL).seconds.do(asyncio.run, scheduled_check()) #Schedule the check
+    while True:
+        schedule.run_pending()
+        await asyncio.sleep(1)
+
+if __name__ == "__main__":
+    logger.info("Starting RSS Feed Telegram Bot...")
+
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)) #Added debug and reloader to prevent issues
+    flask_thread.start()
+
+    # Run the bot in the main thread
+    asyncio.run(run_bot())
