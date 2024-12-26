@@ -1,4 +1,5 @@
 # !pip install -r requirements.txt
+# !pip install -r requirements.txt
 import feedparser
 import asyncio
 import re
@@ -34,14 +35,7 @@ processed_articles = set()
 last_non_silent_post = datetime.min
 
 # Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("rss_bot.log"),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Flask app for Render Web Service
@@ -54,15 +48,6 @@ def home():
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
-
-def is_valid_content(text):
-    """Check if content is valid."""
-    words = text.split()
-    unique_words = set(words)
-    # Filter out content that is too short or has excessive repetition
-    if len(words) < 50 or len(unique_words) / len(words) < 0.5:
-        return False
-    return True
 
 def summarize_text(title, content):
     """Summarize content using Hugging Face Inference API."""
@@ -83,14 +68,12 @@ def summarize_text(title, content):
             headers=headers,
         )
         if response.status_code == 200:
-            summary = response.json()[0]["summary_text"]
-            if is_valid_content(summary):
-                return clean_text(summary)
-            else:
-                logger.warning("Summary was invalid; using fallback.")
+            return clean_text(response.json()[0]["summary_text"])
+        else:
+            logger.error(f"Hugging Face API Error: {response.json()}")
     except Exception as e:
         logger.error(f"Error using Hugging Face API: {e}")
-
+    
     return content[:150]  # Fallback to truncation
 
 def extract_media_from_page(url):
@@ -129,19 +112,18 @@ def fetch_articles():
                 guid = entry.get("id", entry.link)
                 if guid not in processed_articles:
                     processed_articles.add(guid)
+                    media_url = entry.get("media_content", [{}])[0].get("url", "")
+                    if not media_url:
+                        media_url = entry.get("enclosures", [{}])[0].get("url", "")
                     full_content, full_media_url = fetch_full_article_content(entry.link)
-                    
-                    # Validate content before adding
-                    if not is_valid_content(full_content):
-                        logger.warning(f"Skipping invalid content from {entry.link}")
-                        continue
-                    
+                    if not media_url:
+                        media_url = full_media_url
                     articles.append({
                         "title": entry.title,
                         "link": entry.link,
                         "summary": full_content or entry.get("summary", ""),
                         "published": entry.get("published", ""),
-                        "media_url": full_media_url
+                        "media_url": media_url
                     })
         except Exception as e:
             logger.error(f"Error fetching articles from {feed_url}: {e}")
@@ -154,7 +136,7 @@ async def post_to_telegram(bot, article, silent=False):
         caption = f"*{article['title']}*\n\n{summary}\n\n{BRANDING_MESSAGE}"
 
         if article["media_url"]:
-            await bot.send_photo(
+            response = await bot.send_photo(
                 chat_id=CHAT_ID,
                 photo=article["media_url"],
                 caption=caption,
@@ -162,12 +144,14 @@ async def post_to_telegram(bot, article, silent=False):
                 disable_notification=silent
             )
         else:
-            await bot.send_message(
+            response = await bot.send_message(
                 chat_id=CHAT_ID,
                 text=caption,
                 parse_mode="Markdown",
                 disable_notification=silent
             )
+
+        logger.info(f"Message sent successfully: {response}")
     except Exception as e:
         logger.error(f"Error posting to Telegram: {e}")
 
@@ -180,7 +164,10 @@ async def monitor_feeds():
 
     while True:
         articles = fetch_articles()
+        logger.info(f"Fetched {len(articles)} articles.")
+
         for article in articles:
+            logger.info(f"Processing article: {article['title']}")
             now = datetime.now()
             silent = (now - last_non_silent_post) < timedelta(seconds=NON_SILENT_INTERVAL)
 
@@ -189,6 +176,7 @@ async def monitor_feeds():
             if not silent:
                 last_non_silent_post = now
 
+        logger.info("Sleeping until next fetch cycle.")
         await asyncio.sleep(CHECK_INTERVAL)
 
 # Start monitoring feeds in the background
