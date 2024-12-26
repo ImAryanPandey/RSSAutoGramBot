@@ -10,7 +10,6 @@ from bs4 import BeautifulSoup
 import logging
 import os
 from flask import Flask
-from threading import Thread
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Use environment variable for bot token
@@ -35,12 +34,18 @@ processed_articles = set()
 last_non_silent_post = datetime.min
 
 # Logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("rss_bot.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Flask app for Render Web Service
 app = Flask(__name__)
-
 @app.route('/')
 def home():
     return "RSS Feed Telegram Bot is Running!"
@@ -49,6 +54,15 @@ def home():
 def clean_text(text):
     """Clean text using regex."""
     return re.sub(r'\s+([.,!?])', r'\1', text)
+
+def is_valid_content(text):
+    """Check if content is valid."""
+    words = text.split()
+    unique_words = set(words)
+    # Filter out content that is too short or has excessive repetition
+    if len(words) < 50 or len(unique_words) / len(words) < 0.5:
+        return False
+    return True
 
 def summarize_text(title, content):
     """Summarize content using Hugging Face Inference API."""
@@ -69,13 +83,27 @@ def summarize_text(title, content):
             headers=headers,
         )
         if response.status_code == 200:
-            return clean_text(response.json()[0]["summary_text"])
-        else:
-            logger.error(f"Hugging Face API Error: {response.json()}")
+            summary = response.json()[0]["summary_text"]
+            if is_valid_content(summary):
+                return clean_text(summary)
+            else:
+                logger.warning("Summary was invalid; using fallback.")
     except Exception as e:
         logger.error(f"Error using Hugging Face API: {e}")
-    
+
     return content[:150]  # Fallback to truncation
+
+def extract_media_from_page(url):
+    """Extract media URL from the full article page."""
+    try:
+        response = requests.get(url, timeout=10)
+        soup = BeautifulSoup(response.content, "html.parser")
+        image_tag = soup.find("meta", property="og:image") or soup.find("img")
+        if image_tag:
+            return image_tag.get("content") or image_tag.get("src")
+    except Exception as e:
+        logger.error(f"Error fetching media from {url}: {e}")
+    return ""
 
 def fetch_full_article_content(url):
     """Fetch full article content and media from the link."""
@@ -102,6 +130,12 @@ def fetch_articles():
                 if guid not in processed_articles:
                     processed_articles.add(guid)
                     full_content, full_media_url = fetch_full_article_content(entry.link)
+                    
+                    # Validate content before adding
+                    if not is_valid_content(full_content):
+                        logger.warning(f"Skipping invalid content from {entry.link}")
+                        continue
+                    
                     articles.append({
                         "title": entry.title,
                         "link": entry.link,
@@ -145,7 +179,6 @@ async def monitor_feeds():
     bot = application.bot
 
     while True:
-        logger.info("Fetching articles from RSS feeds...")
         articles = fetch_articles()
         for article in articles:
             now = datetime.now()
@@ -156,19 +189,11 @@ async def monitor_feeds():
             if not silent:
                 last_non_silent_post = now
 
-        logger.info(f"Sleeping for {CHECK_INTERVAL} seconds.")
         await asyncio.sleep(CHECK_INTERVAL)
 
-def start_monitor_feeds():
-    """Starts the monitor_feeds coroutine in a new thread."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(monitor_feeds())
+# Start monitoring feeds in the background
+asyncio.ensure_future(monitor_feeds())
 
+# Run the Flask app
 if __name__ == "__main__":
-    # Start the feed monitor in a background thread
-    thread = Thread(target=start_monitor_feeds, daemon=True)
-    thread.start()
-
-    # Start the Flask app
     app.run(host="0.0.0.0", port=5000)
