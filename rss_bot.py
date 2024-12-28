@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import logging
 from telegram.helpers import escape_markdown
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +71,18 @@ def fetch_full_article_content(url):
         except Exception as fallback_error:
             logger.error(f"BeautifulSoup failed for {url}: {fallback_error}")
             return "", ""
+
+
+def truncate_to_sentence(content, max_words=200):
+    """Truncate content to the nearest full stop after max_words."""
+    words = content.split()
+    if len(words) <= max_words:
+        return content
+    truncated = " ".join(words[:max_words])
+    last_period_index = truncated.rfind(".")
+    if last_period_index != -1:
+        return truncated[:last_period_index + 1]
+    return truncated  # Fallback if no period is found
 
 
 def summarize_with_meaningcloud(content):
@@ -142,7 +155,7 @@ def fetch_articles():
                     if not summary:
                         summary = summarize_with_huggingface(full_content)
                     if not summary:
-                        summary = full_content[:200] + "..."  # Fallback
+                        summary = truncate_to_sentence(full_content, max_words=200)
 
                     articles.append({
                         "title": title,
@@ -160,23 +173,18 @@ async def post_to_telegram(bot, article, silent=False):
     try:
         caption = f"*{escape_markdown(article['title'], version=2)}*\n\n{escape_markdown(article['summary'], version=2)}\n\n{escape_markdown(BRANDING_MESSAGE, version=2)}"
         if article["media_url"]:
-            await bot.send_photo(
-                chat_id=CHAT_ID,
-                photo=article["media_url"],
-                caption=caption,
-                parse_mode="MarkdownV2",
-                disable_notification=silent
-            )
+            await bot.send_photo(chat_id=CHAT_ID, photo=article["media_url"], caption=caption, parse_mode="MarkdownV2", disable_notification=silent)
         else:
-            await bot.send_message(
-                chat_id=CHAT_ID,
-                text=caption,
-                parse_mode="MarkdownV2",
-                disable_notification=silent
-            )
+            await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="MarkdownV2", disable_notification=silent)
         logger.info(f"Posted to Telegram: {article['title']}")
-    except Exception as e:
-        logger.error(f"Error posting to Telegram: {e}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:  # Too many requests
+            retry_after = int(e.response.headers.get("Retry-After", 1))
+            logger.error(f"Flood control exceeded. Retrying in {retry_after} seconds.")
+            await asyncio.sleep(retry_after)
+            await post_to_telegram(bot, article, silent)
+        else:
+            logger.error(f"Error posting to Telegram: {e}")
 
 
 async def monitor_feeds():
