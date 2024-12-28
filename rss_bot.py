@@ -3,8 +3,6 @@ import os
 import feedparser
 import asyncio
 import re
-from telegram.ext import Application
-from datetime import datetime, timedelta
 from newspaper import Article
 import requests
 from bs4 import BeautifulSoup
@@ -26,7 +24,6 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://techcrunch.com/category/tech/feed/",
     "https://www.theverge.com/tech/rss/index.xml",
     "https://arstechnica.com/feed/",
     "https://wired.com/feed/category/tech/latest/rss",
@@ -47,26 +44,73 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def clean_text(text):
-    """Clean text using regex."""
-    text = re.sub(r'(?:\s*\b(\w+)\b\s*){3,}', r'\1', text)  # Remove repeated words
-    return re.sub(r'\s+([.,!?])', r'\1', text)
+def fetch_full_article_content(url):
+    """Fetch full article content and media from the link."""
+    try:
+        # Primary: newspaper3k
+        article = Article(url)
+        article.download()
+        article.parse()
+        logger.info(f"Content fetched using newspaper3k: {url}")
+        return article.text, article.top_image
+    except Exception as e:
+        logger.error(f"Error with newspaper3k for {url}: {e}")
+        # Fallback: BeautifulSoup
+        try:
+            response = requests.get(url, timeout=10)
+            soup = BeautifulSoup(response.content, "html.parser")
+            paragraphs = [p.get_text() for p in soup.find_all("p")]
+            full_content = " ".join(paragraphs)
+
+            # Extract image
+            images = soup.find_all("img")
+            top_image = images[0]["src"] if images else None
+            logger.info(f"Content fetched using BeautifulSoup: {url}")
+            return full_content, top_image
+        except Exception as fallback_error:
+            logger.error(f"BeautifulSoup failed for {url}: {fallback_error}")
+            return "", ""
 
 
-def escape_telegram_markdown(text):
-    """Escape special characters for Telegram Markdown."""
-    return escape_markdown(text, version=2)
+def summarize_with_meaningcloud(content):
+    """Summarize using MeaningCloud API."""
+    try:
+        response = requests.post(
+            f"https://api.meaningcloud.com/summarization-1.0",
+            data={"key": MEANINGCLOUD_API_KEY, "txt": content, "sentences": 5},
+        )
+        if response.status_code == 200:
+            summary = response.json().get("summary", "")
+            logger.info(f"Summary generated with MeaningCloud: {len(summary)} characters")
+            return summary
+        else:
+            logger.error(f"MeaningCloud error: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Error with MeaningCloud: {e}")
+        return None
 
 
-def summarize_text(title, content, fallback):
-    """Summarize text using basic NLP cleaning."""
-    if not content or content.strip() == "":
-        logger.warning("Content is empty; falling back to title.")
-        return fallback
-    summary = clean_text(content)
-    if len(summary) > 200:  # Limit summary length
-        summary = summary[:200] + "..."
-    return summary
+def summarize_with_huggingface(content):
+    """Summarize using Hugging Face API."""
+    try:
+        headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+        response = requests.post(
+            "https://api-inference.huggingface.co/models/facebook/bart-large-cnn",
+            headers=headers,
+            json={"inputs": content, "parameters": {"max_length": 200, "min_length": 100, "do_sample": False}},
+            timeout=30,
+        )
+        if response.status_code == 200:
+            summary = response.json()[0]["summary_text"]
+            logger.info(f"Summary generated with Hugging Face: {len(summary)} characters")
+            return summary
+        else:
+            logger.error(f"Hugging Face error: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Error with Hugging Face: {e}")
+        return None
 
 
 def fetch_articles():
@@ -82,18 +126,27 @@ def fetch_articles():
                 guid = entry.get("id", entry.link)
                 if guid not in processed_articles:
                     processed_articles.add(guid)
+
+                    # Fetch full content
                     title = entry.title
-                    summary = entry.get("summary", title)
-                    if title in summary:
-                        summary = summary.replace(title, "").strip()
-                    media_url = None
-                    enclosures = entry.get("enclosures", [])
-                    if enclosures and "url" in enclosures[0]:
-                        media_url = enclosures[0]["url"]
+                    link = entry.link
+                    full_content, media_url = fetch_full_article_content(link)
+
+                    # Skip if content fetch failed
+                    if not full_content:
+                        logger.warning(f"Failed to fetch content for: {title}")
+                        continue
+
+                    # Summarize
+                    summary = summarize_with_meaningcloud(full_content)
+                    if not summary:
+                        summary = summarize_with_huggingface(full_content)
+                    if not summary:
+                        summary = full_content[:200] + "..."  # Fallback
 
                     articles.append({
                         "title": title,
-                        "link": entry.link,
+                        "link": link,
                         "summary": summary,
                         "media_url": media_url,
                     })
@@ -105,9 +158,7 @@ def fetch_articles():
 async def post_to_telegram(bot, article, silent=False):
     """Post an article to Telegram."""
     try:
-        summary = summarize_text(article["title"], article["summary"], article["title"])
-        caption = f"*{escape_telegram_markdown(article['title'])}*\n\n{escape_telegram_markdown(summary)}\n\n{escape_telegram_markdown(BRANDING_MESSAGE)}"
-
+        caption = f"*{escape_markdown(article['title'], version=2)}*\n\n{escape_markdown(article['summary'], version=2)}\n\n{escape_markdown(BRANDING_MESSAGE, version=2)}"
         if article["media_url"]:
             await bot.send_photo(
                 chat_id=CHAT_ID,
@@ -123,12 +174,14 @@ async def post_to_telegram(bot, article, silent=False):
                 parse_mode="MarkdownV2",
                 disable_notification=silent
             )
+        logger.info(f"Posted to Telegram: {article['title']}")
     except Exception as e:
         logger.error(f"Error posting to Telegram: {e}")
 
 
 async def monitor_feeds():
     """Monitor RSS feeds and post updates to Telegram."""
+    from telegram.ext import Application  # Import here for async compatibility
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
 
