@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import logging
 from telegram.helpers import escape_markdown
+from telegram.error import RetryAfter, TelegramError
 from datetime import datetime
 
 # Load environment variables
@@ -33,12 +34,12 @@ RSS_FEEDS = [
     "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
 ]
 CHECK_INTERVAL = 600  # 10 minutes in seconds
-NON_SILENT_INTERVAL = 3600  # 1 hour in seconds
+POST_DELAY = 5  # Delay in seconds between Telegram posts
+MAX_RETRIES = 5  # Maximum retry attempts for flood control
 BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
 
 # State tracking
 processed_articles = set()
-last_non_silent_post = datetime.min
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -126,85 +127,94 @@ def summarize_with_huggingface(content):
         return None
 
 
-def fetch_articles():
-    """Fetch articles from multiple RSS feeds."""
-    articles = []
-    for feed_url in RSS_FEEDS:
-        try:
-            feed = feedparser.parse(feed_url)
-            if not feed.entries:
-                logger.warning(f"No entries found in feed: {feed_url}")
-                continue
-            for entry in feed.entries:
-                guid = entry.get("id", entry.link)
-                if guid not in processed_articles:
-                    processed_articles.add(guid)
-
-                    # Fetch full content
-                    title = entry.title
-                    link = entry.link
-                    full_content, media_url = fetch_full_article_content(link)
-
-                    # Skip if content fetch failed
-                    if not full_content:
-                        logger.warning(f"Failed to fetch content for: {title}")
-                        continue
-
-                    # Summarize
-                    summary = summarize_with_meaningcloud(full_content)
-                    if not summary:
-                        summary = summarize_with_huggingface(full_content)
-                    if not summary:
-                        summary = truncate_to_sentence(full_content, max_words=200)
-
-                    articles.append({
-                        "title": title,
-                        "link": link,
-                        "summary": summary,
-                        "media_url": media_url,
-                    })
-        except Exception as e:
-            logger.error(f"Error fetching articles from {feed_url}: {e}")
-    return articles
-
-
-async def post_to_telegram(bot, article, silent=False):
-    """Post an article to Telegram."""
+async def post_to_telegram(bot, article, retries=0):
+    """Post an article to Telegram with retry limit."""
     try:
-        caption = f"*{escape_markdown(article['title'], version=2)}*\n\n{escape_markdown(article['summary'], version=2)}\n\n{escape_markdown(BRANDING_MESSAGE, version=2)}"
+        caption = (
+            f"*{escape_markdown(article['title'], version=2)}*\n\n"
+            f"{escape_markdown(article['summary'], version=2)}\n\n"
+            f"{escape_markdown(BRANDING_MESSAGE, version=2)}"
+        )
         if article["media_url"]:
-            await bot.send_photo(chat_id=CHAT_ID, photo=article["media_url"], caption=caption, parse_mode="MarkdownV2", disable_notification=silent)
+            await bot.send_photo(
+                chat_id=CHAT_ID,
+                photo=article["media_url"],
+                caption=caption,
+                parse_mode="MarkdownV2"
+            )
         else:
-            await bot.send_message(chat_id=CHAT_ID, text=caption, parse_mode="MarkdownV2", disable_notification=silent)
-        logger.info(f"Posted to Telegram: {article['title']}")
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:  # Too many requests
-            retry_after = int(e.response.headers.get("Retry-After", 1))
-            logger.error(f"Flood control exceeded. Retrying in {retry_after} seconds.")
+            await bot.send_message(
+                chat_id=CHAT_ID,
+                text=caption,
+                parse_mode="MarkdownV2"
+            )
+        logger.info(f"Posted to Telegram: {article['title']} (Link: {article['link']})")
+    except RetryAfter as e:
+        if retries < MAX_RETRIES:
+            retry_after = int(e.retry_after)
+            logger.error(f"Flood control exceeded. Retrying in {retry_after} seconds (Attempt {retries + 1}/{MAX_RETRIES}).")
             await asyncio.sleep(retry_after)
-            await post_to_telegram(bot, article, silent)
+            await post_to_telegram(bot, article, retries=retries + 1)
         else:
-            logger.error(f"Error posting to Telegram: {e}")
+            logger.error(f"Max retries reached for article: {article['title']}")
+    except TelegramError as e:
+        logger.error(f"TelegramError: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error while posting to Telegram: {e}")
 
 
-async def monitor_feeds():
-    """Monitor RSS feeds and post updates to Telegram."""
+async def fetch_and_post(bot):
+    """Fetch articles and post them sequentially."""
+    while True:
+        articles = []
+        for feed_url in RSS_FEEDS:
+            try:
+                feed = feedparser.parse(feed_url)
+                if not feed.entries:
+                    logger.warning(f"No entries found in feed: {feed_url}")
+                    continue
+                for entry in feed.entries:
+                    guid = entry.get("id", entry.link)
+                    if guid not in processed_articles:
+                        processed_articles.add(guid)
+
+                        # Fetch full content
+                        title = entry.title
+                        link = entry.link
+                        full_content, media_url = fetch_full_article_content(link)
+
+                        # Skip if content fetch failed
+                        if not full_content:
+                            logger.warning(f"Failed to fetch content for: {title}")
+                            continue
+
+                        # Summarize
+                        summary = summarize_with_meaningcloud(full_content)
+                        if not summary:
+                            summary = summarize_with_huggingface(full_content)
+                        if not summary:
+                            summary = truncate_to_sentence(full_content, max_words=200)
+
+                        article = {"title": title, "link": link, "summary": summary, "media_url": media_url}
+                        articles.append(article)
+            except Exception as e:
+                logger.error(f"Error fetching articles from {feed_url}: {e}")
+
+        for article in articles:
+            await post_to_telegram(bot, article)
+            await asyncio.sleep(POST_DELAY)  # Delay to prevent flooding
+        await asyncio.sleep(CHECK_INTERVAL)  # Wait before the next fetch cycle
+
+
+async def run_app():
+    """Run both Flask app and fetch_and_post concurrently."""
     from telegram.ext import Application  # Import here for async compatibility
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
 
-    while True:
-        articles = fetch_articles()
-        for article in articles:
-            await post_to_telegram(bot, article)
-        await asyncio.sleep(CHECK_INTERVAL)
-
-
-async def run_app():
-    """Run both Flask app and monitor_feeds concurrently."""
     flask_task = asyncio.to_thread(app.run, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-    monitor_task = monitor_feeds()
-    await asyncio.gather(flask_task, monitor_task)
+    fetch_task = fetch_and_post(bot)
+    await asyncio.gather(flask_task, fetch_task)
 
 
 if __name__ == "__main__":
