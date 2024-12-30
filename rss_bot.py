@@ -26,12 +26,6 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
-    "https://www.theverge.com/tech/rss/index.xml",
-    "https://arstechnica.com/feed/",
-    "https://wired.com/feed/category/tech/latest/rss",
-    "https://tldr.tech/api/rss/tech",
-    "https://www.wired.com/feed/tag/ai/latest/rss",
-    "https://www.theverge.com/ai-artificial-intelligence/rss/index.xml",
 ]
 CHECK_INTERVAL = 600  # 10 minutes in seconds
 POST_DELAY = 5  # Delay in seconds between Telegram posts
@@ -40,6 +34,7 @@ BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
 
 # State tracking
 processed_articles = set()
+last_fetch_time = {}  # To track the last fetch time for each RSS feed
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -86,6 +81,7 @@ def truncate_to_sentence(content, max_words=200):
     return truncated  # Fallback if no period is found
 
 
+'''
 def summarize_with_meaningcloud(content):
     """Summarize using MeaningCloud API."""
     try:
@@ -103,8 +99,10 @@ def summarize_with_meaningcloud(content):
     except Exception as e:
         logger.error(f"Error with MeaningCloud: {e}")
         return None
+'''
 
 
+# Remove MeaningCloud summarization
 def summarize_with_huggingface(content):
     """Summarize using Hugging Face API."""
     try:
@@ -125,6 +123,14 @@ def summarize_with_huggingface(content):
     except Exception as e:
         logger.error(f"Error with Hugging Face: {e}")
         return None
+
+
+def summarize_content(content):
+    """Summarize content using Hugging Face or truncate as fallback."""
+    summary = summarize_with_huggingface(content)
+    if not summary:
+        summary = truncate_to_sentence(content, max_words=200)
+    return summary
 
 
 async def post_to_telegram(bot, article, retries=0):
@@ -166,44 +172,58 @@ async def post_to_telegram(bot, article, retries=0):
 async def fetch_and_post(bot):
     """Fetch articles and post them sequentially."""
     while True:
-        articles = []
         for feed_url in RSS_FEEDS:
             try:
+                # Log last fetch time
+                logger.info(f"Last fetch time for {feed_url}: {last_fetch_time.get(feed_url, 'Never fetched')}")
+
+                # Fetch the feed
                 feed = feedparser.parse(feed_url)
+                last_fetch_time[feed_url] = datetime.now()
+
                 if not feed.entries:
                     logger.warning(f"No entries found in feed: {feed_url}")
                     continue
+
+                logger.info(f"Found {len(feed.entries)} entries in feed: {feed_url}")
+
                 for entry in feed.entries:
                     guid = entry.get("id", entry.link)
-                    if guid not in processed_articles:
-                        processed_articles.add(guid)
+                    if guid in processed_articles:
+                        logger.info(f"Article already processed: {guid}")
+                        continue
 
-                        # Fetch full content
-                        title = entry.title
-                        link = entry.link
-                        full_content, media_url = fetch_full_article_content(link)
+                    processed_articles.add(guid)
 
-                        # Skip if content fetch failed
-                        if not full_content:
-                            logger.warning(f"Failed to fetch content for: {title}")
-                            continue
+                    # Fetch full content
+                    title = entry.title
+                    link = entry.link
+                    full_content, media_url = fetch_full_article_content(link)
 
-                        # Summarize
-                        summary = summarize_with_meaningcloud(full_content)
-                        if not summary:
-                            summary = summarize_with_huggingface(full_content)
-                        if not summary:
-                            summary = truncate_to_sentence(full_content, max_words=200)
+                    if not full_content:
+                        logger.warning(f"Failed to fetch content for: {title}")
+                        continue
 
-                        article = {"title": title, "link": link, "summary": summary, "media_url": media_url}
-                        articles.append(article)
+                    # Summarize content
+                    summary = summarize_content(full_content)
+
+                    # Prepare the article
+                    article = {
+                        "title": title,
+                        "link": link,
+                        "summary": summary,
+                        "media_url": media_url,
+                    }
+
+                    # Post to Telegram
+                    await post_to_telegram(bot, article)
+                    await asyncio.sleep(POST_DELAY)  # Delay between posts to prevent flooding
             except Exception as e:
                 logger.error(f"Error fetching articles from {feed_url}: {e}")
 
-        for article in articles:
-            await post_to_telegram(bot, article)
-            await asyncio.sleep(POST_DELAY)  # Delay to prevent flooding
-        await asyncio.sleep(CHECK_INTERVAL)  # Wait before the next fetch cycle
+        # Wait before checking feeds again
+        logger.info(f"Waiting {CHECK_INTERVAL} seconds before the next fetch cycle...")
+        await asyncio.sleep(CHECK_INTERVAL)
 
 
 async def run_app():
