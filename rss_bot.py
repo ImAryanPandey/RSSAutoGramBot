@@ -21,7 +21,7 @@ app = Flask(__name__)
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-MEANINGCLOUD_API_KEY = os.getenv("MEANINGCLOUD_API_KEY")
+#MEANINGCLOUD_API_KEY = os.getenv("MEANINGCLOUD_API_KEY")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 RSS_FEEDS = [
@@ -69,7 +69,7 @@ def fetch_full_article_content(url):
             return "", ""
 
 
-def truncate_to_sentence(content, max_words=200):
+def truncate_to_sentence(content, max_words=170):
     """Truncate content to the nearest full stop after max_words."""
     words = content.split()
     if len(words) <= max_words:
