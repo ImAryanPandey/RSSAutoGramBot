@@ -11,6 +11,7 @@ import logging
 from telegram.helpers import escape_markdown
 from telegram.error import RetryAfter, TelegramError
 from datetime import datetime
+import psutil  # Add this to imports
 
 # Load environment variables
 load_dotenv()
@@ -41,6 +42,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+def log_system_resources():
+    """Log system resource usage."""
+    cpu_usage = psutil.cpu_percent()
+    memory_usage = psutil.virtual_memory().percent
+    logger.info(f"System Resources - CPU Usage: {cpu_usage}%, Memory Usage: {memory_usage}%")
+
+
 def fetch_full_article_content(url):
     """Fetch full article content and media from the link."""
     try:
@@ -69,7 +77,7 @@ def fetch_full_article_content(url):
             return "", ""
 
 
-def truncate_to_sentence(content, max_words=170):
+def truncate_to_sentence(content, max_words):
     """Truncate content to the nearest full stop after max_words."""
     words = content.split()
     if len(words) <= max_words:
@@ -125,17 +133,25 @@ def summarize_with_huggingface(content):
         return None
 
 
-def summarize_content(content):
+def summarize_content(content, max_length):
     """Summarize content using Hugging Face or truncate as fallback."""
-    summary = summarize_with_huggingface(content)
+# Pre-truncate content to 500 words for Hugging Face
+    truncated_content = truncate_to_sentence(content, max_words=500)
+    summary = summarize_with_huggingface(truncated_content)
     if not summary:
-        summary = truncate_to_sentence(content, max_words=200)
+        summary = truncate_to_sentence(content, max_words=max_length)
     return summary
 
 
 async def post_to_telegram(bot, article, retries=0):
     """Post an article to Telegram with retry limit."""
     try:
+        # Calculate dynamic max length for truncation
+        branding_length = len(BRANDING_MESSAGE)
+        max_caption_length = 1024 - len(article["title"]) - branding_length - 20  # Reserve space for formatting
+        logger.info(f"Calculated max caption length: {max_caption_length} characters (~{max_caption_length // 5} words)")
+        article["summary"] = truncate_to_sentence(article["summary"], max_words=max_caption_length // 5)
+
         caption = (
             f"*{escape_markdown(article['title'], version=2)}*\n\n"
             f"{escape_markdown(article['summary'], version=2)}\n\n"
@@ -172,6 +188,8 @@ async def post_to_telegram(bot, article, retries=0):
 async def fetch_and_post(bot):
     """Fetch articles and post them sequentially."""
     while True:
+        log_system_resources() # Log at start of fetch cycle
+        logger.info(f"Starting new fetch cycle at {datetime.now()}")
         for feed_url in RSS_FEEDS:
             try:
                 # Log last fetch time
