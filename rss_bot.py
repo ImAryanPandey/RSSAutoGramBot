@@ -111,8 +111,8 @@ def summarize_with_meaningcloud(content):
 
 
 # Remove MeaningCloud summarization
-def summarize_with_huggingface(content):
-    """Summarize using Hugging Face API."""
+def summarize_with_huggingface(content, retries=0, max_retries=3):
+    """Summarize using Hugging Face API with retry for loading errors."""
     try:
         headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
         response = requests.post(
@@ -125,6 +125,11 @@ def summarize_with_huggingface(content):
             summary = response.json()[0]["summary_text"]
             logger.info(f"Summary generated with Hugging Face: {len(summary)} characters")
             return summary
+        elif response.status_code == 503 and retries < max_retries:
+            # Retry if model is loading
+            logger.warning(f"Model loading, retrying in {2 ** retries} seconds...")
+            time.sleep(2 ** retries)
+            return summarize_with_huggingface(content, retries=retries + 1, max_retries=max_retries)
         else:
             logger.error(f"Hugging Face error: {response.text}")
             return None
