@@ -28,7 +28,7 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 RSS_FEEDS = [
     "https://techcrunch.com/category/artificial-intelligence/feed/",
 ]
-CHECK_INTERVAL = 600  # 10 minutes in seconds
+CHECK_INTERVAL = 60  # 10 minutes in seconds
 POST_DELAY = 5  # Delay in seconds between Telegram posts
 MAX_RETRIES = 5  # Maximum retry attempts for flood control
 BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
@@ -153,7 +153,7 @@ async def post_to_telegram(bot, article, retries=0):
     try:
         # Calculate dynamic max length for truncation
         branding_length = len(BRANDING_MESSAGE)
-        max_caption_length = 1024 - len(article["title"]) - branding_length - 20  # Reserve space for formatting
+        max_caption_length = 1024 - len(article["title"]) - branding_length - 30  # Reserve space for formatting
         logger.info(f"Calculated max caption length: {max_caption_length} characters (~{max_caption_length // 5} words)")
         article["summary"] = truncate_to_sentence(article["summary"], max_words=max_caption_length // 5)
 
