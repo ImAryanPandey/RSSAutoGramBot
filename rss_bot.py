@@ -223,7 +223,7 @@ async def fetch_and_post(bot):
                         continue
 
                     # Summarize content
-                    summary = summarize_content(full_content)
+                    summary = summarize_content(full_content, max_length=max_caption_length // 5)
 
                     # Prepare the article
                     article = {
