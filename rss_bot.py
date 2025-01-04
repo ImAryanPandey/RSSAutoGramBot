@@ -222,6 +222,11 @@ async def fetch_and_post(bot):
                         logger.warning(f"Failed to fetch content for: {title}")
                         continue
 
+                    # Calculate dynamic max length for summarization
+                    branding_length = len(BRANDING_MESSAGE)
+                    max_caption_length = 1024 - len(title) - branding_length - 20  # Reserve space for formatting
+                    logger.info(f"Calculated max summary length: {max_caption_length // 5} words (~{max_caption_length} characters)")
+
                     # Summarize content
                     summary = summarize_content(full_content, max_length=max_caption_length // 5)
 
