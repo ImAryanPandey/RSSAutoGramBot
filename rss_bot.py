@@ -19,7 +19,7 @@ load_dotenv()
 # Flask setup
 app = Flask(__name__)
 
-@app.route("/keepalive")
+@app.route("/keepalive", methods=["GET"])
 def keepalive():
     """Endpoint to respond to external pings and keep the service live."""
     return "Service is live", 200
