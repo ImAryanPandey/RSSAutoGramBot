@@ -19,6 +19,12 @@ load_dotenv()
 # Flask setup
 app = Flask(__name__)
 
+@app.route("/keepalive")
+def keepalive():
+    """Endpoint to respond to external pings and keep the service live."""
+    return "Service is live", 200
+
+
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -193,61 +199,61 @@ async def post_to_telegram(bot, article, retries=0):
 async def fetch_and_post(bot):
     """Fetch articles and post them sequentially."""
     while True:
-        log_system_resources() # Log at start of fetch cycle
-        logger.info(f"Starting new fetch cycle at {datetime.now()}")
-        for feed_url in RSS_FEEDS:
-            try:
-                # Log last fetch time
-                logger.info(f"Last fetch time for {feed_url}: {last_fetch_time.get(feed_url, 'Never fetched')}")
+        log_system_resources()  # Log at start of fetch cycle
+        logger.info(f"Heartbeat: Starting fetch cycle at {datetime.now()}")
+        try:
+            for feed_url in RSS_FEEDS:
+                try:
+                    # Log last fetch time
+                    logger.info(f"Last fetch time for {feed_url}: {last_fetch_time.get(feed_url, 'Never fetched')}")
 
-                # Fetch the feed
-                feed = feedparser.parse(feed_url)
-                last_fetch_time[feed_url] = datetime.now()
+                    # Fetch the feed
+                    feed = feedparser.parse(feed_url)
+                    last_fetch_time[feed_url] = datetime.now()
 
-                if not feed.entries:
-                    logger.warning(f"No entries found in feed: {feed_url}")
-                    continue
-
-                logger.info(f"Found {len(feed.entries)} entries in feed: {feed_url}")
-
-                for entry in feed.entries:
-                    guid = entry.get("id", entry.link)
-                    if guid in processed_articles:
-                        logger.info(f"Article already processed: {guid}")
+                    if not feed.entries:
+                        logger.warning(f"No entries found in feed: {feed_url}")
                         continue
 
-                    processed_articles.add(guid)
+                    logger.info(f"Found {len(feed.entries)} entries in feed: {feed_url}")
 
-                    # Fetch full content
-                    title = entry.title
-                    link = entry.link
-                    full_content, media_url = fetch_full_article_content(link)
+                    for entry in feed.entries:
+                        guid = entry.get("id", entry.link)
+                        if guid in processed_articles:
+                            logger.info(f"Article already processed: {guid}")
+                            continue
 
-                    if not full_content:
-                        logger.warning(f"Failed to fetch content for: {title}")
-                        continue
+                        processed_articles.add(guid)
 
-                    # Calculate dynamic max length for summarization
-                    branding_length = len(BRANDING_MESSAGE)
-                    max_caption_length = 1024 - len(title) - branding_length - 20  # Reserve space for formatting
-                    logger.info(f"Calculated max summary length: {max_caption_length // 5} words (~{max_caption_length} characters)")
+                        # Fetch full content
+                        title = entry.title
+                        link = entry.link
+                        full_content, media_url = fetch_full_article_content(link)
 
-                    # Summarize content
-                    summary = summarize_content(full_content, max_length=max_caption_length // 5)
+                        if not full_content:
+                            logger.warning(f"Failed to fetch content for: {title}")
+                            continue
 
-                    # Prepare the article
-                    article = {
-                        "title": title,
-                        "link": link,
-                        "summary": summary,
-                        "media_url": media_url,
-                    }
+                        # Summarize content
+                        summary = summarize_content(full_content, max_length=150)
 
-                    # Post to Telegram
-                    await post_to_telegram(bot, article)
-                    await asyncio.sleep(POST_DELAY)  # Delay between posts to prevent flooding
-            except Exception as e:
-                logger.error(f"Error fetching articles from {feed_url}: {e}")
+                        # Prepare the article
+                        article = {
+                            "title": title,
+                            "link": link,
+                            "summary": summary,
+                            "media_url": media_url,
+                        }
+
+                        # Post to Telegram
+                        await post_to_telegram(bot, article)
+                        await asyncio.sleep(POST_DELAY)  # Delay between posts to prevent flooding
+                except Exception as e:
+                    logger.error(f"Error fetching articles from {feed_url}: {e}")
+
+            logger.info(f"Heartbeat: Completed fetch cycle at {datetime.now()}")
+        except Exception as loop_error:
+            logger.error(f"Unhandled error in fetch loop: {loop_error}")
 
         # Wait before checking feeds again
         logger.info(f"Waiting {CHECK_INTERVAL} seconds before the next fetch cycle...")
