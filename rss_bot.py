@@ -1,7 +1,7 @@
 from flask import Flask
 import os
 import feedparser
-import asyncio
+import asyncio  # Ensuring asyncio is used instead of time for async tasks
 import re
 from newspaper import Article
 import requests
@@ -11,7 +11,7 @@ import logging
 from telegram.helpers import escape_markdown
 from telegram.error import RetryAfter, TelegramError
 from datetime import datetime
-import psutil  # Add this to imports
+import psutil  # Added for system resource monitoring
 
 # Load environment variables
 load_dotenv()
@@ -28,16 +28,14 @@ def keepalive():
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-#MEANINGCLOUD_API_KEY = os.getenv("MEANINGCLOUD_API_KEY")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-RSS_FEEDS = [
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
-]
-CHECK_INTERVAL = 60  # 10 minutes in seconds
-POST_DELAY = 5  # Delay in seconds between Telegram posts
-MAX_RETRIES = 5  # Maximum retry attempts for flood control
-BRANDING_MESSAGE = "Follow us for the latest updates in tech and AI!"
+# Change to dynamic loading of RSS feeds and branding message
+RSS_FEEDS = os.getenv("RSS_FEEDS", "").split(",")  # Splitting the environment variable by commas
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))  # Default to 60 seconds
+POST_DELAY = int(os.getenv("POST_DELAY", 5))  # Default to 5 seconds
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))  # Default to 5 retries
+BRANDING_MESSAGE = os.getenv("BM", "Follow us for the latest updates in tech and AI!")
 
 # State tracking
 processed_articles = set()
@@ -95,29 +93,8 @@ def truncate_to_sentence(content, max_words):
     return truncated  # Fallback if no period is found
 
 
-'''
-def summarize_with_meaningcloud(content):
-    """Summarize using MeaningCloud API."""
-    try:
-        response = requests.post(
-            f"https://api.meaningcloud.com/summarization-1.0",
-            data={"key": MEANINGCLOUD_API_KEY, "txt": content, "sentences": 5},
-        )
-        if response.status_code == 200:
-            summary = response.json().get("summary", "")
-            logger.info(f"Summary generated with MeaningCloud: {len(summary)} characters")
-            return summary
-        else:
-            logger.error(f"MeaningCloud error: {response.text}")
-            return None
-    except Exception as e:
-        logger.error(f"Error with MeaningCloud: {e}")
-        return None
-'''
-
-
 # Remove MeaningCloud summarization
-def summarize_with_huggingface(content, retries=0, max_retries=3):
+async def summarize_with_huggingface(content, retries=0, max_retries=3):
     """Summarize using Hugging Face API with retry for loading errors."""
     try:
         headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
@@ -133,9 +110,10 @@ def summarize_with_huggingface(content, retries=0, max_retries=3):
             return summary
         elif response.status_code == 503 and retries < max_retries:
             # Retry if model is loading
-            logger.warning(f"Model loading, retrying in {2 ** retries} seconds...")
-            time.sleep(2 ** retries)
-            return summarize_with_huggingface(content, retries=retries + 1, max_retries=max_retries)
+            delay = 2 ** retries
+            logger.warning(f"Model loading, retrying in {delay} seconds...")
+            await asyncio.sleep(delay)  # Corrected to non-blocking sleep
+            return await summarize_with_huggingface(content, retries=retries + 1, max_retries=max_retries)
         else:
             logger.error(f"Hugging Face error: {response.text}")
             return None
@@ -144,11 +122,10 @@ def summarize_with_huggingface(content, retries=0, max_retries=3):
         return None
 
 
-def summarize_content(content, max_length):
+async def summarize_content(content, max_length):
     """Summarize content using Hugging Face or truncate as fallback."""
-# Pre-truncate content to 500 words for Hugging Face
     truncated_content = truncate_to_sentence(content, max_words=500)
-    summary = summarize_with_huggingface(truncated_content)
+    summary = await summarize_with_huggingface(truncated_content)
     if not summary:
         summary = truncate_to_sentence(content, max_words=max_length)
     return summary
@@ -157,7 +134,6 @@ def summarize_content(content, max_length):
 async def post_to_telegram(bot, article, retries=0):
     """Post an article to Telegram with retry limit."""
     try:
-        # Calculate dynamic max length for truncation
         branding_length = len(BRANDING_MESSAGE)
         max_caption_length = 1024 - len(article["title"]) - branding_length - 30  # Reserve space for formatting
         logger.info(f"Calculated max caption length: {max_caption_length} characters (~{max_caption_length // 5} words)")
@@ -199,15 +175,12 @@ async def post_to_telegram(bot, article, retries=0):
 async def fetch_and_post(bot):
     """Fetch articles and post them sequentially."""
     while True:
-        log_system_resources()  # Log at start of fetch cycle
+        log_system_resources()
         logger.info(f"Heartbeat: Starting fetch cycle at {datetime.now()}")
         try:
             for feed_url in RSS_FEEDS:
                 try:
-                    # Log last fetch time
                     logger.info(f"Last fetch time for {feed_url}: {last_fetch_time.get(feed_url, 'Never fetched')}")
-
-                    # Fetch the feed
                     feed = feedparser.parse(feed_url)
                     last_fetch_time[feed_url] = datetime.now()
 
@@ -224,8 +197,6 @@ async def fetch_and_post(bot):
                             continue
 
                         processed_articles.add(guid)
-
-                        # Fetch full content
                         title = entry.title
                         link = entry.link
                         full_content, media_url = fetch_full_article_content(link)
@@ -234,10 +205,8 @@ async def fetch_and_post(bot):
                             logger.warning(f"Failed to fetch content for: {title}")
                             continue
 
-                        # Summarize content
-                        summary = summarize_content(full_content, max_length=150)
+                        summary = await summarize_content(full_content, max_length=150)
 
-                        # Prepare the article
                         article = {
                             "title": title,
                             "link": link,
@@ -245,24 +214,21 @@ async def fetch_and_post(bot):
                             "media_url": media_url,
                         }
 
-                        # Post to Telegram
                         await post_to_telegram(bot, article)
-                        await asyncio.sleep(POST_DELAY)  # Delay between posts to prevent flooding
+                        await asyncio.sleep(POST_DELAY)
                 except Exception as e:
                     logger.error(f"Error fetching articles from {feed_url}: {e}")
-
             logger.info(f"Heartbeat: Completed fetch cycle at {datetime.now()}")
         except Exception as loop_error:
             logger.error(f"Unhandled error in fetch loop: {loop_error}")
 
-        # Wait before checking feeds again
         logger.info(f"Waiting {CHECK_INTERVAL} seconds before the next fetch cycle...")
         await asyncio.sleep(CHECK_INTERVAL)
 
 
 async def run_app():
     """Run both Flask app and fetch_and_post concurrently."""
-    from telegram.ext import Application  # Import here for async compatibility
+    from telegram.ext import Application
     application = Application.builder().token(BOT_TOKEN).build()
     bot = application.bot
 
