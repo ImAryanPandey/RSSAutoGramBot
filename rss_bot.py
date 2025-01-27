@@ -35,7 +35,7 @@ RSS_FEEDS = os.getenv("RSS_FEEDS", "").split(",")  # Splitting the environment v
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 600))  # Default to 300 seconds
 POST_DELAY = int(os.getenv("POST_DELAY", 15))  # Default to 15 seconds
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))  # Default to 5 retries
-BRANDING_MESSAGE = os.getenv("BM", "Follow us for the latest updates in tech and AI!")
+BRANDING_MESSAGE = os.getenv("BM", "Follow us for the latest Updates!")
 
 # State tracking
 processed_articles = set()
