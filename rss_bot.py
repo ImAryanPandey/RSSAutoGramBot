@@ -32,8 +32,8 @@ HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 # Change to dynamic loading of RSS feeds and branding message
 RSS_FEEDS = os.getenv("RSS_FEEDS", "").split(",")  # Splitting the environment variable by commas
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 60))  # Default to 60 seconds
-POST_DELAY = int(os.getenv("POST_DELAY", 5))  # Default to 5 seconds
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 600))  # Default to 300 seconds
+POST_DELAY = int(os.getenv("POST_DELAY", 15))  # Default to 15 seconds
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))  # Default to 5 retries
 BRANDING_MESSAGE = os.getenv("BM", "Follow us for the latest updates in tech and AI!")
 
