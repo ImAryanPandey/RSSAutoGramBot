@@ -1,10 +1,8 @@
-Flask
-feedparser
-asyncio
-python-telegram-bot
-newspaper3k
-requests
-beautifulsoup4
-python-dotenv
-lxml[html_clean]  # Fix for the lxml.html.clean dependency
-psutil
+gunicorn==21.2.0
+flask==3.0.0
+python-telegram-bot==20.3
+newspaper3k==0.2.8
+lxml==4.9.3
+feedparser==6.0.10
+requests==2.31.0
+redis==4.5.5
